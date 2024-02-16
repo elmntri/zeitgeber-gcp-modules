@@ -1,4 +1,4 @@
-module gitlab.elmntri.co/zeitgeber/gcp-modules
+module github.com/elmntri/zeitgeber-gcp-modules
 
 go 1.21
 
