@@ -1,19 +1,21 @@
 package bucket_connector
 
 import (
+	"bytes"
 	"context"
-	"fmt"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
-	"github.com/google/uuid"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -25,9 +27,9 @@ const (
 )
 
 type UploaderReq struct {
-    FileName string `json:"file_name"`
-    Category string `json:"category"`
-    RawData  string `json:"rowData"`
+	FileName string `json:"file_name"`
+	Category string `json:"category"`
+	RawData  string `json:"rowData"`
 }
 
 type BucketConnector struct {
@@ -45,7 +47,6 @@ type Params struct {
 }
 
 func Module(scope string) fx.Option {
-
 	var m *BucketConnector
 
 	return fx.Module(
@@ -109,10 +110,86 @@ func (c *BucketConnector) onStart(ctx context.Context) error {
 }
 
 func (c *BucketConnector) onStop(ctx context.Context) error {
-
 	c.logger.Info("Stopped BucketConnector")
-
 	return c.client.Close()
+}
+
+func (c *BucketConnector) GetBucket() *storage.BucketHandle {
+	bucketName := viper.GetString(c.getConfigPath("bucket_name"))
+	return c.client.Bucket(bucketName)
+}
+
+func (c *BucketConnector) DeleteFileWithPrefix(filePath string) error {
+	bucket := c.GetBucket()
+
+	// Delete the objects with the prefix
+	it := bucket.Objects(context.Background(), &storage.Query{
+		Prefix: filePath,
+	})
+	for {
+		objAttrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		err = bucket.Object(objAttrs.Name).Delete(context.Background())
+		if err != nil && err != storage.ErrObjectNotExist {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *BucketConnector) DeleteFile(filePath string) error {
+
+	bucket := c.GetBucket()
+
+	// Delete the object
+	err := bucket.Object(filePath).Delete(context.Background())
+	if err != nil {
+
+		if err == storage.ErrObjectNotExist {
+			return nil
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (c *BucketConnector) WriteAsFile(filePath string, content []byte) (string, error) {
+	bucket := c.GetBucket()
+	w := bucket.Object(filePath).NewWriter(context.Background())
+	w.ACL = []storage.ACLRule{
+		{
+			Entity: storage.AllUsers,
+			Role:   storage.RoleReader,
+		},
+	}
+
+	// Write the content to the bucket
+	reader := bytes.NewReader(content)
+	if _, err := io.Copy(w, reader); err != nil {
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+
+	// Preparing external URL
+	u, err := url.Parse(fmt.Sprintf("%v/%v", w.Attrs().Bucket, w.Attrs().Name))
+	if err != nil {
+		return "", err
+	}
+
+	url := fmt.Sprintf("https://%s", u.EscapedPath())
+
+	return url, nil
 }
 
 func (c *BucketConnector) SaveFile(req *UploaderReq) (string, error) {
@@ -125,7 +202,7 @@ func (c *BucketConnector) SaveFile(req *UploaderReq) (string, error) {
 	// init uploder
 	fileName := uuid.New().String()
 	if req.FileName != "" {
-		fileName = req.FileName;
+		fileName = req.FileName
 	}
 
 	filePath := fmt.Sprintf("%s/%s", req.Category, fileName)
